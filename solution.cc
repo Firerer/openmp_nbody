@@ -184,7 +184,8 @@ int main(int argc, char *argv[]) {
   discrete_distribution<int> rand_dx;
   vector<double> dmin(N);
   // 1.1 each choose a point
-  vector<vector<double>> centroids(size, vector<double>(D));
+  /* vector<vector<double>> centroids(size, vector<double>(D)); */
+  vector<double> centroids(size * D);
   // 1.1.1 find min d(i) for all points
   for (int i = 0; i < N; ++i) {
     dmin[i] = numeric_limits<double>::infinity();
@@ -201,8 +202,8 @@ int main(int argc, char *argv[]) {
   // 1.1.2 choose a point with probability d(i)^2/sum(d(i)^2)
   rand_dx = discrete_distribution<int>(dmin.begin(), dmin.end());
   int r = rand_dx(gen.engine);
-  /* COMM_WORLD.Gather(cluster.points[r].pos.data(), D, MPI_DOUBLE, */
-  /*                   centroids.data(), D, MPI_DOUBLE, MAIN); */
+  COMM_WORLD.Gather(cluster.points[r].pos.data(), D, MPI_DOUBLE,
+                    centroids.data(), D, MPI_DOUBLE, MAIN);
 
   MPI_Finalize();
   return 0;
