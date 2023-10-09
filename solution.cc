@@ -8,13 +8,67 @@
 #include <typeinfo>
 #include <vector>
 
+#define DEBUG(x) x
+/* #define DEBUG(x) */
+#define ASSERT(x, msg)                                                         \
+  if (!(x)) {                                                                  \
+    cout << "ASSERTION FAILED: " << msg << endl;                               \
+    exit(1);                                                                   \
+  }
 using namespace std;
 using namespace MPI;
 const double WEIGHT = 1;
 const double INTERVAL = 1;
 const int G = 1;
+const int MAIN = 0;
+int RANK;
+int SIZE;
 int N;
 int D;
+
+void print(vector<double> &v) {
+  for (auto &c : v) {
+    cout << c << ",";
+  }
+  cout << endl;
+}
+
+void print(double *v, int n) {
+  cout << "(rank " << RANK << ")";
+  for (int i = 0; i < n; i++) {
+    cout << v[i] << ",";
+  }
+  cout << endl;
+}
+
+struct Coord {
+  double *coord;
+  Coord() { coord = new double[D]; }
+  Coord(double *coord) { this->coord = coord; }
+  ~Coord() { delete[] coord; }
+  double &operator[](int i) {
+    DEBUG(ASSERT(0 <= i && i < D, "Coord[] out of range");)
+    return coord[i];
+  }
+  double *begin() { return coord; }
+  double *end() { return coord + D; }
+};
+
+struct Coords {
+  double *coords;
+  int n;
+  Coords(int n) {
+    coords = new double[n * D];
+    this->n = n;
+  }
+  ~Coords() { delete[] coords; }
+  Coord operator[](int i) {
+    DEBUG(ASSERT(0 <= i && i < D, "Coords[] out of range");)
+    return Coord(coords + i * D);
+  }
+  double *begin() { return coords; }
+  double *end() { return coords + n * D; }
+};
 
 struct Point {
   vector<double> pos;
@@ -44,7 +98,7 @@ struct Point {
   double dist_square(vector<double> &p) {
     double dist = 0;
     for (int i = 0; i < D; i++) {
-      dist += ldexp(pos[i] - p[i], 2);
+      dist += pow(pos[i] - p[i], 2);
     }
     return dist;
   }
@@ -109,9 +163,12 @@ struct Cluster {
   vector<double> psum;
   vector<Point> points;
   vector<vector<double>> centroids;
+  double **centroids_;
+  double *centroids_data;
 
   Cluster(Generator gen) {
     psum = vector<double>(D);
+    centroids_data = new double[N * D];
     centroids = vector<vector<double>>(N, vector<double>(D));
     points = vector<Point>(N);
     for (int i = 0; i < N; i++) {
@@ -157,36 +214,40 @@ private:
   Cluster &operator=(const Cluster &);
 };
 
-const int MAIN = 0;
-
 int main(int argc, char *argv[]) {
   // init
   MPI::Init();
-  const int rank = COMM_WORLD.Get_rank();
-  const int size = COMM_WORLD.Get_size();
-  cout << "Hello from " << rank << " of " << size << endl;
+  RANK = COMM_WORLD.Get_rank();
+  SIZE = COMM_WORLD.Get_size();
+  cout << "Hello from " << RANK << " of " << SIZE << endl;
+
+  MPI_Datatype MPI_D;
+  MPI_Type_contiguous(D, MPI_DOUBLE, &MPI_D);
+  MPI_Type_commit(&MPI_D);
 
   // all read file avoid communication
   ifstream file = ifstream(argv[1]);
   file >> N >> D;
-  Generator gen(rank, file);
+  Generator gen(RANK, file);
   Cluster cluster(gen);
 
   // first centroid
   uniform_int_distribution<int> uni(0, N);
   int first = uni(gen.engine);
-  if (rank == MAIN) {
+  if (RANK == MAIN) {
     cluster.centroids[0] = cluster.points[first].pos;
   }
   COMM_WORLD.Bcast(cluster.centroids[0].data(), D, MPI_DOUBLE, MAIN);
+
   // rest centroids
   int n_center = 1;
   discrete_distribution<int> rand_dx;
   vector<double> dmin(N);
+
   // 1.1 each choose a point
-  /* vector<vector<double>> centroids(size, vector<double>(D)); */
-  vector<double> centroids(size * D);
-  // 1.1.1 find min d(i) for all points
+
+  // 1.1.1 each find min d(i) for all points, and total sum
+  double sum = 0;
   for (int i = 0; i < N; ++i) {
     dmin[i] = numeric_limits<double>::infinity();
     for (int j = 0; j < n_center; ++j) {
@@ -195,15 +256,41 @@ int main(int argc, char *argv[]) {
         dmin[i] = dist;
       }
     }
+    sum += dmin[i];
   }
-
-  MPI_Datatype MPI_D;
-  MPI_Type_contiguous(D, MPI_DOUBLE, &MPI_D);
-  // 1.1.2 choose a point with probability d(i)^2/sum(d(i)^2)
+  // 1.1.2 each choose a point in proportion to dmin
   rand_dx = discrete_distribution<int>(dmin.begin(), dmin.end());
   int r = rand_dx(gen.engine);
-  COMM_WORLD.Gather(cluster.points[r].pos.data(), D, MPI_DOUBLE,
-                    centroids.data(), D, MPI_DOUBLE, MAIN);
+  double *centroid = cluster.points[r].pos.data();
+  vector<double> centroids;
+  Coord centroid_(cluster.points[r].pos.data());
+  Coords centroids_;
+  vector<double> sums;
+
+  if (RANK == MAIN) {
+    centroids = vector<double>(SIZE * D);
+    sums = vector<double>(SIZE);
+    centroids_ = Coords(SIZE);
+  }
+  // 1.1.3 gather all centroids and sums
+  COMM_WORLD.Gather(centroid, D, MPI_DOUBLE, centroids_.begin(), D, MPI_DOUBLE,
+                    MAIN);
+  COMM_WORLD.Gather(&sum, 1, MPI_DOUBLE, sums.data(), 1, MPI_DOUBLE, MAIN);
+  // 1.1.4 main choose a centroid in proportion to sum and broadcast
+  int cluster_i;
+  if (RANK == MAIN) {
+    rand_dx = discrete_distribution<int>(dmin.begin(), dmin.end());
+    cluster_i = rand_dx(gen.engine);
+    centroid = centroids.data() + cluster_i * D;
+  }
+  COMM_WORLD.Bcast(centroid, D, MPI_DOUBLE, MAIN);
+
+  // 1.1.5 each assign new centroid
+  /* cluster.centroids[n_center] = centroid; */
+  n_center += 1;
+
+  Coords coords(10);
+  print(centroid, D);
 
   MPI_Finalize();
   return 0;
