@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <mpi.h>
@@ -9,8 +10,14 @@
 #include <vector>
 
 #define DEBUG(x) x
-#define STATUS(x) cout << "[rank " << RANK << "]: " << x << endl;
-/* #define DEBUG(x) */
+#define STATUS(x) cout << "[rank " << RANK << "]: " << x;
+
+#ifdef DEBUG
+#include "./dbg.h"
+#else
+#define dbg(...)
+#endif // DEBUG
+
 #define ASSERT(x, msg)                                                         \
   if (!(x)) {                                                                  \
     cout << "ASSERTION FAILED: " << msg << endl;                               \
@@ -26,13 +33,6 @@ int SIZE;
 int N;
 int D;
 
-void print(vector<double> &v) {
-  for (auto &c : v) {
-    cout << c << ",";
-  }
-  cout << endl;
-}
-
 void coord_print(double *c) {
   cout << "(";
   for (int i = 0; i < D; i++) {
@@ -41,12 +41,26 @@ void coord_print(double *c) {
   cout << ")";
 }
 
-void print(double *v, int n) {
-  cout << "(rank " << RANK << ")";
-  for (int i = 0; i < n; i++) {
-    cout << v[i] << ",";
+std::string coord_str(double *c) {
+  std::stringstream ss;
+  ss << "(";
+  for (int i = 0; i < D; i++) {
+    ss << std::scientific << std::setprecision(2) << c[i];
+    if (i < D - 1) {
+      ss << ",";
+    }
   }
-  cout << endl;
+  ss << ")";
+  return ss.str();
+}
+
+std::ostream &operator<<(std::ostream &out, double *v) {
+  out << "(";
+  for (int i = 0; i < D; i++) {
+    out << v[i] << ",";
+  }
+  out << ")";
+  return out;
 }
 
 struct Generator {
@@ -88,9 +102,9 @@ struct Generator {
   }
 };
 
-inline double *coord_at(double *arr, int i) { return arr + i * D; }
+inline double *crd_at(double *arr, int i) { return arr + i * D; }
 
-inline void coord_copy(double *src, double *dst) {
+inline void crd_copy(double *src, double *dst) {
   memcpy(dst, src, D * sizeof(double));
 }
 
@@ -102,15 +116,25 @@ double coord_dist_square(double *p1, double *p2) {
   return dist;
 }
 
+int coord_closest(double *p, double *centroids) {
+  double min_dist = coord_dist_square(p, centroids);
+  int min_idx = 0;
+  for (int i = 1; i < SIZE; i++) {
+    double *c = crd_at(centroids, i);
+    double dist = coord_dist_square(p, c);
+    if (dist < min_dist) {
+      min_dist = dist;
+      min_idx = i;
+    }
+  }
+  return min_idx;
+}
+
 int main(int argc, char *argv[]) {
   // init
   MPI::Init();
   RANK = COMM_WORLD.Get_rank();
   SIZE = COMM_WORLD.Get_size();
-
-  MPI_Datatype MPI_D;
-  MPI_Type_contiguous(D, MPI_DOUBLE, &MPI_D);
-  MPI_Type_commit(&MPI_D);
 
   // all read file avoid communication
   ifstream file = ifstream(argv[1]);
@@ -124,71 +148,65 @@ int main(int argc, char *argv[]) {
   double *velocities = new double[N * D];
   double *psum = new double[D];
   for (int i = 0; i < N; i++) {
-    gen.rand_coord(positions + i * D);
+    gen.rand_coord(crd_at(positions, i));
   }
 
   // first centroid
-  uniform_int_distribution<int> uni(0, n);
-  if (RANK == MAIN) {
-    coord_copy(positions + uni(gen.engine) * D, centroids);
+  uniform_int_distribution<int> uni(0, n - 1);
+  int first = uni(gen.engine);
+  double *p = crd_at(positions, first);
+  /* COMM_WORLD.Bcast(centroids, D, MPI_DOUBLE, MAIN); */
+  COMM_WORLD.Allgather(p, D, MPI_DOUBLE, centroids, D, MPI_DOUBLE);
+
+  //
+  // prepare for alltoallv
+  //
+  int *sendcounts = new int[SIZE];
+  int *sdispls = new int[SIZE];
+  int *recvcounts = new int[SIZE];
+  int *rdispls = new int[SIZE];
+
+  // sort centroids by distance
+  double *sendbuf = new double[n * D];
+  int *target_centroids = new int[n]; // tmp array for cal sendbuf offset
+  memset(sendcounts, 0, SIZE * sizeof(int));
+  for (int i = 0; i < n; i++) {
+    int target = coord_closest(crd_at(positions, i), centroids);
+    target_centroids[i] = target;
+    sendcounts[target]++;
   }
-  COMM_WORLD.Bcast(centroids, D, MPI_DOUBLE, MAIN);
-
-  // rest centroids
-  discrete_distribution<int> rand_dx;
-  double sum = 0;
-  double *dmin = new double[n];
-  double *round_centroids;
-  double *round_sums;
-  if (RANK == MAIN) {
-    round_centroids = new double[SIZE * D];
-    round_sums = new double[SIZE];
+  for (int i = 0; i < SIZE; i++) {
+    cout << "rank " << RANK << "send to " << i
+         << " sendcounts: " << sendcounts[i] << endl;
   }
-  for (int r = 1; r < SIZE; ++r) {
-    // 1.1 each choose a point
-    // 1.1.1 each find min d(i) for all points, and total sum
-    sum = 0;
-    for (int i = 0; i < n; ++i) {
-      dmin[i] = numeric_limits<double>::infinity();
-      for (int j = 0; j < r; ++j) {
-        double dist =
-            coord_dist_square(coord_at(positions, i), coord_at(centroids, j));
-        /* if (r == SIZE - 1) { */
-        /*   DEBUG(STATUS("dist: " << dist)); */
-        /* } */
-        if (dist < dmin[i]) {
-          /* if (r == SIZE - 1) { */
-          /*   DEBUG(STATUS("dmin " << i << ": " << dist)); */
-          /* } */
-          dmin[i] = dist;
-        }
-      }
-      sum += dmin[i];
-    }
-    // 1.1.2 each choose a point in proportion to dmin
-    rand_dx = discrete_distribution<int>(dmin, dmin + N);
-    coord_copy(coord_at(positions, rand_dx(gen.engine)),
-               coord_at(centroids, r));
+  // cal prefix sum of sendcounts
+  // for sendbuf offset
+  sdispls[0] = 0;
+  for (int i = 1; i < SIZE; i++) {
+    sdispls[i] = sdispls[i - 1] + sendcounts[i - 1];
+  }
+  // for sendbuf[target_centroids[i]] offset
+  memset(rdispls, 0, SIZE * sizeof(int));
 
-    DEBUG(STATUS("round: " << r << " sum: " << sum))
-    // 1.1.3 gather all centroids and sums
-    COMM_WORLD.Gather(&sum, 1, MPI_DOUBLE, round_sums, 1, MPI_DOUBLE, MAIN);
+  for (int i = 0; i < n; i++) {
+    double *from = crd_at(positions, i);
+    int t = target_centroids[i];
+    int offset = sdispls[t] + rdispls[t];
+    rdispls[t]++;
+    double *to = crd_at(sendbuf, offset);
+    cout << i << " at " << offset << endl;
+    crd_copy(from, to);
+  }
 
-    COMM_WORLD.Gather(coord_at(centroids, r), D, MPI_DOUBLE, round_centroids, D,
-                      MPI_DOUBLE, MAIN);
-
-    /* // 1.1.4 main choose a centroid in proportion to sum and broadcast */
-    if (RANK == MAIN) {
-      rand_dx = discrete_distribution<int>(round_sums, round_sums + SIZE);
-      coord_copy(coord_at(round_centroids, rand_dx(gen.engine)),
-                 coord_at(centroids, r));
-    }
-
-    DEBUG(STATUS("round: " << r << " before bcast " << sum))
-    /* COMM_WORLD.Bcast(coord_at(centroids, r), D, MPI_DOUBLE, MAIN); */
-    DEBUG(STATUS("round: " << r << " done"))
-
-    /* print(cluster.centroids[n_center]); */
+  COMM_WORLD.Alltoall(sendcounts, 1, MPI_INT, recvcounts, 1, MPI_INT);
+  for (int i = 0; i < SIZE; i++) {
+    cout << "rank " << RANK << " sdis[" << i << "]" << sdispls[i] << " rdis["
+         << i << "]" << rdispls[i] << endl;
+  }
+  COMM_WORLD.Alltoall(sdispls, 1, MPI_INT, rdispls, 1, MPI_INT);
+  for (int i = 0; i < SIZE; i++) {
+    cout << "rank " << RANK << " to " << i << " sendcounts: " << sendcounts[i]
+         << " senddispls " << sdispls[i] << rdispls[i] << endl;
   }
 
   MPI_Finalize();
