@@ -1,16 +1,22 @@
 # MAKEFLAGS += -j7
 
 CFLAGS = -Wall -fopenmp
-SANFLAGS = -fsanitize=object-size  -fsanitize=undefined # -fsanitize=address
+SANFLAGS = -fsanitize=object-size  -fsanitize=undefined #-fsanitize=address
 LIBS = -lmpi_cxx -lmpi -lm
 CC= g++
 FILE = solution.cc
+OLD_FILE = solution.bak.cc
 
-solution: $(FILE) FORCE
+export OMP_NUM_THREADS=4
+
+solution: $(FILE)
 	$(CC) $(CFLAGS) $(SANFLAGS) $(LIBS) $(FILE) -o solution
 
-run: solution FORCE
+run: solution
 	mpirun -np 4 ./solution input.txt
+
+plot: solution plot.py
+	mpirun -np 4 ./solution input.txt && python3 plot.py
 
 debug: solution FORCE
 	mpirun -np 4 ./solution inputbig.txt
