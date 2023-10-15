@@ -6,20 +6,22 @@ from matplotlib.widgets import Slider
 
 def read():
     d = []
-    for f in glob.glob("log/*.txt"):
-        for line in open(f):
-            if line.startswith("||"):
-                ps = line[2:-2].split(",")
-                d.append(
-                    [
-                        int(ps[0]),
-                        int(ps[1]),
-                        float(ps[2]),
-                        float(ps[3]),
-                        float(ps[4]),
-                        int(ps[5]),
-                    ]
-                )
+    for f in glob.glob("./log/*"):
+        print(f)
+        with open(f) as f:
+            for line in f:
+                if line.startswith("||"):
+                    ps = line[2:-2].split(",")
+                    d.append(
+                        [
+                            int(ps[0]),
+                            int(ps[1]),
+                            float(ps[2]),
+                            float(ps[3]),
+                            float(ps[4]),
+                            int(ps[5]),
+                        ]
+                    )
     return np.array(d)
 
 
