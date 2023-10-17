@@ -11,11 +11,14 @@
 \usepackage{parskip} % remove first line indentation for paragraphs
 \usepackage{amsmath}
 \usepackage[normalem]{ulem} % \sout strikethrough
-\newcommand{\smath}[1]{\hbox{\sout{$#1$}}}
+\newcommand{\smath}[1]{\hbox{\sout{$#1$}}} %strikethrough for math expression
+\usepackage[noend]{algpseudocode}
+\usepackage{listings}
+\usepackage{graphicx}
 
 % Title and Author Information
-\title{Assignment Title}
-\author{Di Liu}
+\title{COMP90025 Assignment 2 - Gravity simulation using MPI}
+\author{Di Liu (1399095)}
 \date{\today}
 
 \begin{document}
@@ -23,15 +26,122 @@
 \maketitle
 
 \section{Introduction}
-% Your introduction goes here
+% 400 words
 
-\section{Main Content}
-% Your main content goes here
-The distance between two points $P_1(x_1, y_1)$ and $P_2(x_2, y_2)$ is
-generally 1 unit.
+% define the problem as above in your own words
+Gravity simulation in a parallel setting
+for distributed computing using MPI and openMP is balance between accuracy and
+performance. While the goal of the simulation is to mimic the gravity follow newtown's
+newton's gravitational law, the
+implementation does not strickly follow the equation. Rather, the simulation
+is a simplification of the physics of gravity, where the gravitational constant is
+set to be 1 and all the weight of masss are set to be 1. Therefore, the implementation
+is a simulation of the computational process for the gravity simulation.
+Also to ensure the simulation stops at some point, the force between two points
+is set to have a max of 1 unit. This is to ensure that the force between two points
+will not be too large when 2 points are close to each other, resulting in hugly accerlated
+particles outwards and increase the distance variance.
 
-\subsection{Subsection Title}
+% and discuss the parallel technique that you have implemented.
+For the purpose of simulation, the number of particles $N$ can grow to be very large while
+the number of processes $k$ and dimesion $D$ can be small.
+Hence in the implementation, the communication between processes avoids points
+synchronization which can be costly. Furthermore, to make the communication more
+effecient, more advanced techniques such as =Alltoallv=, =Allgather= are used.
+To further improve the communication, non-blocking communication and merging
+some communication can be used. However, the implementation does not use these
+techniques due to time constriat. To improve the performance, =omp parallel for=
+is used to parallelize the computation when applicable or when a for loop is large enough.
+This applies to most the for loops loop through the particles ($n$) but does not apply
+to demision $D$ loops.
+
+Overall the implementation bias towords performance over accuracy.
+Specifically, the simulation treat a cluster as a whole which does not
+synchronize the points between processes even when the points are close enough.
+This will lead to huge inaccuracy in the simulation
+when generated clusters are closed to each other. Such choice will lead to
+simplier communication logic and eaiser implementation hence was chosen.
+
+% Cite any relevant literature that you have made use of, either as a basis for your code or for comparison.
+% TODO kmeans pp
+The kmeans++ algorithm is used for the more efficient clustering. No other literature
+is used.
+
+
+\textbf{Description:} Parallel pseudo-code for gravitational simulation \\
+\textbf{Input:} number of particles $N$, number of processes $k$\\
+\textbf{Output:} The graph distance $\delta$ from $s$.
+
+\begin{algorithmic}[1]
+\Procedure{kmeans++$_{EREW}^{\diamond}$}{$V, r(\cdot), s$}
+  \State $\delta(\cdot) \gets \infty, \delta(s) \gets 0$
+  \For{$i \in 1..RANK$}
+  \EndFor
+\EndProcedure
+\end{algorithmic}
+
+\section{Methodology}
+% 500 words
+% discuss the experiments that you will use to measure the performance
+% of your program, with mathematical definitions of the performance measures
+% and/or explanations using diagrams, etc.
+
+To measure the performance of the program, we will mainly observe the CPU time
+of different tasks running on different environments and inputs.
+
+The speedup function $speedup(n) = \frac{T}{t(n)}$,
+where $T$ is the CPU time taken when the number of MPI nodes $n=1$,
+and $t(n)$ is the CPU time when the number of nodes is $n$.
+
+As it is not the consider of this project, the experiments will only focus on
+the speedup of the MPI part of the program. The speedup of the OpenMP part
+is not measured and will be set to 4 for each node.
+
+The controllable variables that affect the program are
+the number of particles $N$, the number of clusters $k$,
+the dimension $D$, the number of components $c$.
+
+The shape of the components is also a variable that will
+affect the number of iterations in kmeans and simulation.
+However due to it's complexity it will not be investigated
+into depth.
+
+in this project due to limited time.
+The number of iterations in kmeans clustering $I_1$
+and the number of iterations in kmeans clustering $I_2$
+is also a variable but is not controllable
+
+% The total work $w(n)$ is also measured using CPU time
+% and will be used to compare the work done by the program.
+% To avoid inconsistency between each run, each case will be run
+% 5 times and the median wall time and median CPU time will be taken.
+% A Python script is developed to run this batch and generate appropriate figures.
+
+Specifically, the following questions will be answered:
+
+\begin{itemize}
+    \item How does the number of particles $N$ affect the performance?
+\\The number of particles $N$ is set to be 1000, 10000, 100000, 1000000, 10000000.
+    \item How does the number of clusters $k$ affect the performance?
+\\The number of clusters $k$ is set to be 1, 2, 4, 8, 16, 32, 64, 128, 256, 512.
+    \item How does the dimension $D$ affect the performance?
+\\The dimension $D$ is set to be 1, 2, 3, 4, 5, 6, 7, 8, 9, 10.
+    \item How does the number of iterations $I$ affected by all the above parameters?
+\end{itemize}
+
+% identify the variables and parameters that you will use in your experiments
+% and explain how you will vary them.
+
+% describe the experimental setup, including the hardware and software used,
+% and the data sets used.
+
+\subsection{Experiments}
 % Subsection content
+% describe the results of your experiments, including any tables or graphs
+% that you have used to present the results.
+
+% discuss the results of your experiments, including any tables or graphs
+
 
 \section{Conclusion}
 % Your conclusion goes here

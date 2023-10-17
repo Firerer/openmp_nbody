@@ -10,16 +10,10 @@
 #include <time.h>
 #include <unistd.h>
 
-#define DEBUG(x) x
-#define PLOT
+/* #define PLOT */
 #define kmeanspp
-/* #define DEBUG2 */
-/* #define DEBUG3 */
-#define ASSERT(x, msg)                                                         \
-  if (!(x)) {                                                                  \
-    cout << "ASSERTION FAILED: " << msg << endl;                               \
-    exit(1);                                                                   \
-  }
+#define TIMING
+
 using namespace std;
 using namespace MPI;
 #define WEIGHT 1.0
@@ -117,7 +111,7 @@ int crd_closest(double *p, double *centroids) {
 void cluster_centroid(double *centroid, double *positions, int n) {
   memset(centroid, 0, D * sizeof(double));
   for (int j = 0; j < D; j++) {
-    /* #pragma omp parallel for reduction(+ : centroid[j]) */
+#pragma omp parallel for reduction(+ : centroid[j])
     for (int i = 0; i < n; i++) {
       centroid[j] += positions[i * D + j];
     }
@@ -140,7 +134,7 @@ double cluster_variance(double *centroids, double *positions, int n) {
   double variance = 0;
   double avgs[D]; // for centroids
   for (int j = 0; j < D; j++) {
-    /* #pragma omp parallel for reduction(+ : avgs[j]) */
+#pragma omp parallel for reduction(+ : avgs[j])
     for (int i = 0; i < n; i++) {
       avgs[j] += positions[i * D + j];
     }
@@ -149,7 +143,7 @@ double cluster_variance(double *centroids, double *positions, int n) {
     avgs[j] /= n;
   }
   for (int j = 0; j < D; j++) {
-    /* #pragma omp parallel for reduction(+ : variance) */
+#pragma omp parallel for reduction(+ : variance)
     for (int i = 0; i < n; i++) {
       variance += pow(positions[i * D + j] - avgs[j], 2);
     }
@@ -172,6 +166,9 @@ void cal_force(double *force, int at, double *positions, int *ns,
     }
     pi = crd_at(centroids, i);
     dist = crd_dist_square(target, pi);
+    if (dist == 0) {
+      continue;
+    }
     for (int j = 0; j < D; j++) {
       double added =
           ns[i] * WEIGHT * G * (pi[j] - target[j]) / pow(dist, 3 / 2);
@@ -180,27 +177,27 @@ void cal_force(double *force, int at, double *positions, int *ns,
     }
   }
 
-  /* int hole_mass = N / SIZE; */
-  /* // force from blackhole at center */
-  /* for (int j = 0; j < D; j++) { */
-  /*   double added = N * G * (0 - target[j]) / pow(abs(target[j]), 3 / 2); */
-  /*   added = added > 0 ? min(added, MAX_FORCE) : max(added, -MAX_FORCE); */
-  /*   force[j] += added; */
-  /* } */
+/* int hole_mass = N / SIZE; */
+/* // force from blackhole at center */
+/* for (int j = 0; j < D; j++) { */
+/*   double added = N * G * (0 - target[j]) / pow(abs(target[j]), 3 / 2); */
+/*   added = added > 0 ? min(added, MAX_FORCE) : max(added, -MAX_FORCE); */
+/*   force[j] += added; */
+/* } */
 
-  // force from other points
-  /* #pragma omp parallel for */
+// force from other points
+#pragma omp parallel for private(pi, dist)
   for (int i = 0; i < ns[RANK]; i++) {
-    pi = crd_at(positions, i);
     if (at == i) {
       continue;
     }
+    pi = crd_at(positions, i);
     dist = crd_dist_square(target, pi);
     for (int j = 0; j < D; j++) {
       double added =
           WEIGHT * WEIGHT * G * (pi[j] - target[j]) / pow(dist, 3 / 2);
       added = added > 0 ? min(added, MAX_FORCE) : max(added, -MAX_FORCE);
-      /* #pragma omp atomic */
+#pragma omp atomic
       force[j] += added;
     }
   }
@@ -223,12 +220,12 @@ int kmeans(double *centroids, double *positions, int n) {
     memset(sendcounts, 0, SIZE * sizeof(int));
     memset(rdispls, 0, SIZE * sizeof(int));
 
-    // select centroids & calculate send counts
-    /* #pragma omp parallel for */
+// select centroids & calculate send counts
+#pragma omp parallel for
     for (int i = 0; i < n; i++) {
       int target = crd_closest(crd_at(positions, i), centroids);
       target_centroids[i] = target;
-      /* #pragma omp atomic */
+#pragma omp atomic
       sendcounts[target]++;
     }
 
@@ -239,12 +236,10 @@ int kmeans(double *centroids, double *positions, int n) {
 
     // calculate offset in sendbuf for each point
     // and copy points to sendbuf
-    /* #pragma omp parallel for */
     for (int i = 0; i < n; i++) {
       int t = target_centroids[i];
       int offset = sdispls[t] + rdispls[t];
       crd_copy(crd_at(positions, i), crd_at(sendbuf, offset));
-      /* #pragma omp atomic */
       rdispls[t]++;
     }
 
@@ -287,6 +282,9 @@ int kmeans(double *centroids, double *positions, int n) {
 }
 
 int main(int argc, char *argv[]) {
+#ifdef TIMING
+  clock_t start_t = clock();
+#endif
   // init
   MPI::Init();
   RANK = COMM_WORLD.Get_rank();
@@ -305,22 +303,32 @@ int main(int argc, char *argv[]) {
   if (RANK == MASTER) {
     n += N % SIZE;
   }
+#ifdef TIMING
+  clock_t end_init_t = clock();
+#endif
+
+  // over allocate avoid realloc
   double *positions = (double *)malloc(N * D * sizeof(double));
 
   Generator gen(RANK, file);
   file.close();
-  // over allocate avoid realloc
-  /* #pragma omp parallel for */
   for (int i = 0; i < n; i++) {
     gen.rand_coord(crd_at(positions, i));
   }
-  COMM_WORLD.Barrier();
+
+#ifdef TIMING
+  clock_t end_gen_t = clock();
+#endif
 
   double centroids[SIZE * D];
   // first centroid
   COMM_WORLD.Allgather(crd_at(positions, 0), D, MPI_DOUBLE, centroids, D,
                        MPI_DOUBLE);
 #ifdef kmeanspp
+  /* COMM_WORLD.Bcast(crd_at(positions, 0), D, MPI_DOUBLE, MASTER); */
+  /* crd_copy(positions, centroids); */
+  /* char str[50]; */
+  /* printf("RANK %d first centroids %s\n", RANK, crd_cstr(str, centroids)); */
   // rest centroids
   discrete_distribution<int> rand_dx;
   double sum = 0;
@@ -331,7 +339,7 @@ int main(int argc, char *argv[]) {
     // 1.1 each choose a point
     // 1.1.1 each find min d(i) for all points, and total sum
     sum = 0;
-    /* #pragma omp parallel for reduction(+ : sum) */
+#pragma omp parallel for reduction(+ : sum)
     for (int i = 0; i < n; ++i) {
       dmin[i] = numeric_limits<double>::infinity();
       for (int j = 0; j < r; ++j) {
@@ -365,6 +373,9 @@ int main(int argc, char *argv[]) {
 #endif // DEBUG
   n = kmeans(centroids, positions, n);
 
+#ifdef TIMING
+  clock_t end_kmeans_t = clock();
+#endif
   ///
   /// simulation
   ///
@@ -419,9 +430,28 @@ int main(int argc, char *argv[]) {
     COMM_WORLD.Allreduce(&variance, &sumv, 1, MPI_DOUBLE, MPI_SUM);
   }
 
+#ifdef TIMING
+  clock_t end_t = clock();
+#endif
   free(velocities);
   free(positions);
+
   MPI_Finalize();
+#ifdef TIMING
+  if (RANK == MASTER) {
+    FILE *csv;
+    if (access("record.csv", F_OK) != 0) {
+      csv = fopen("record.csv", "w");
+      fprintf(csv, "N,k,D,c,r,total,gen,kmeans,simulation\n");
+    } else {
+      csv = fopen("record.csv", "w");
+    }
+    fprintf(csv, "%d,%d,%d,%ld,%d,%lf,%lf,%lf,%lf\n", N, SIZE, D,
+            gen.means.size(), r, (double)(clock() - start_t) / CLOCKS_PER_SEC,
+            (double)(end_gen_t - end_init_t) / CLOCKS_PER_SEC,
+            (double)(end_kmeans_t - end_gen_t) / CLOCKS_PER_SEC,
+            (double)(end_t - end_kmeans_t) / CLOCKS_PER_SEC);
+  }
+#endif
   return 0;
 }
-// TODO parallel write to different files
