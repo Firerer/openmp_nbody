@@ -1,3 +1,4 @@
+#include <float.h>
 #include <fstream>
 #include <iostream>
 #include <math.h>
@@ -13,6 +14,7 @@
 /* #define PLOT */
 #define kmeanspp
 #define TIMING
+// #define FIX_R
 
 using namespace std;
 using namespace MPI;
@@ -131,8 +133,13 @@ bool is_centroids_updated(double *old, double *ne) {
 }
 
 double cluster_variance(double *centroids, double *positions, int n) {
+  if (n < 2) {
+    return 0.0;
+  }
   double variance = 0;
   double avgs[D]; // for centroids
+  memset(avgs, 0, D * sizeof(double));
+
   for (int j = 0; j < D; j++) {
 #pragma omp parallel for reduction(+ : avgs[j])
     for (int i = 0; i < n; i++) {
@@ -166,7 +173,7 @@ void cal_force(double *force, int at, double *positions, int *ns,
     }
     pi = crd_at(centroids, i);
     dist = crd_dist_square(target, pi);
-    if (dist == 0) {
+    if (dist == 0 || dist > 100) {
       continue;
     }
     for (int j = 0; j < D; j++) {
@@ -204,14 +211,16 @@ void cal_force(double *force, int at, double *positions, int *ns,
 }
 
 // return new n for current rank
-int kmeans(double *centroids, double *positions, int n) {
+int kmeans(double *centroids, double *positions, int n, int &r) {
   double *sendbuf = (double *)malloc(N * D * sizeof(double));
   int *target_centroids = (int *)malloc(N * sizeof(int));
   int sendcounts[SIZE];
   int sdispls[SIZE];
   int recvcounts[SIZE];
   int rdispls[SIZE];
-  int r = 0;
+  r = 0;
+  /* int r = 0; */
+  /* int *r= round; */
   double *old_centroids = (double *)malloc(N * D * sizeof(double));
   memcpy(old_centroids, centroids, SIZE * D * sizeof(double));
   double tmp[D];
@@ -370,8 +379,9 @@ int main(int argc, char *argv[]) {
 
     COMM_WORLD.Bcast(crd_at(centroids, r), D, MPI_DOUBLE, MASTER);
   }
-#endif // DEBUG
-  n = kmeans(centroids, positions, n);
+#endif
+  int kemans_r = 0;
+  n = kmeans(centroids, positions, n, kemans_r);
 
 #ifdef TIMING
   clock_t end_kmeans_t = clock();
@@ -403,7 +413,7 @@ int main(int argc, char *argv[]) {
     fprintf(log, "%s\n", ps);
   }
 #endif
-  while (r < 1000 && sumv > init_variance / 4) {
+  while (r < 150 && sumv > init_variance / 4) {
 #pragma omp parallel for private(force)
     for (int i = 0; i < n; i++) {
       for (int j = 0; j < D; j++) {
@@ -424,10 +434,11 @@ int main(int argc, char *argv[]) {
       fprintf(log, "%s\n", ps);
     }
 #endif // DEBUG
-    r++;
     // prepare for next round
     variance = cluster_variance(centroids, positions, n);
     COMM_WORLD.Allreduce(&variance, &sumv, 1, MPI_DOUBLE, MPI_SUM);
+    /* printf("RANK %d round %d variance %lf\n", RANK, r, sumv); */
+    r++;
   }
 
 #ifdef TIMING
@@ -436,22 +447,24 @@ int main(int argc, char *argv[]) {
   free(velocities);
   free(positions);
 
-  MPI_Finalize();
 #ifdef TIMING
   if (RANK == MASTER) {
+    const char *csvname = "record.csv";
     FILE *csv;
-    if (access("record.csv", F_OK) != 0) {
-      csv = fopen("record.csv", "w");
-      fprintf(csv, "N,k,D,c,r,total,gen,kmeans,simulation\n");
+    if (access(csvname, F_OK) != 0) {
+      csv = fopen(csvname, "w");
+      fprintf(csv, "N,k,D,c,kr,r,total,gen,kmeans,simulation\n");
     } else {
-      csv = fopen("record.csv", "w");
+      csv = fopen(csvname, "a");
     }
-    fprintf(csv, "%d,%d,%d,%ld,%d,%lf,%lf,%lf,%lf\n", N, SIZE, D,
-            gen.means.size(), r, (double)(clock() - start_t) / CLOCKS_PER_SEC,
+    fprintf(csv, "%d,%d,%d,%ld,%d,%d,%lf,%lf,%lf,%lf\n", N, SIZE, D,
+            gen.means.size(), kemans_r, r,
+            (double)(clock() - start_t) / CLOCKS_PER_SEC,
             (double)(end_gen_t - end_init_t) / CLOCKS_PER_SEC,
             (double)(end_kmeans_t - end_gen_t) / CLOCKS_PER_SEC,
             (double)(end_t - end_kmeans_t) / CLOCKS_PER_SEC);
   }
 #endif
+  MPI_Finalize();
   return 0;
 }
